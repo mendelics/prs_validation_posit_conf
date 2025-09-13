@@ -1,0 +1,301 @@
+---
+title: "PRS Validation With Tidymodels"
+format: html
+---
+
+```{r, include = F}
+library(ggplot2)
+library(tidymodels)
+library(dplyr)
+library(tidyr)
+
+```
+
+```{r functions, include = F}
+get_control_stats <- function(df) {
+  df |>
+    filter(status == 0) |>
+    summarise(across(
+      starts_with("prs"),
+      list(mean = mean, sd = sd),
+      .names = "{.col}_{.fn}"
+    ))
+}
+```
+
+### Read the data
+
+Starting point of the data you should read into R.
+
+```{r}
+breast <- readr::read_csv(here::here("preprocessed_prs_file.csv"))
+```
+
+### Split the sample
+
+Split the sample into training and testing sets with {rsample}. Use status as strata in order to balance cases and controls in the split.
+
+
+Setting the seed because it is important for reproducibility.
+
+```{r}
+set.seed(28)
+
+split <- initial_split(breast, strata = status, prop = 0.75)
+
+train <- training(split)
+test <- testing(split)
+
+```
+
+### Normalize PRSs
+
+Normalize the PRS based on mean and standard deviation of controls
+
+```{r}
+control_stats_train <- get_control_stats(train)
+
+train_ctrl_stats <- train |>
+  # create norm prss
+  dplyr::mutate(
+    prs_3820_norm = (prs_3820 - control_stats_train$prs_3820_mean) /
+      control_stats_train$prs_3820_sd,
+    prs_broad_norm = (prs_broad - control_stats_train$prs_broad_mean) /
+      control_stats_train$prs_broad_sd,
+    prs_313_norm = (prs_313 - control_stats_train$prs_313_mean) /
+      control_stats_train$prs_313_sd,
+    prs_ukbb_norm = (prs_ukbb - control_stats_train$prs_ukbb_mean) /
+      control_stats_train$prs_ukbb_sd
+  ) |>
+  select(
+    !all_of(c("prs_broad", "prs_313", "prs_3820", "prs_ukbb"))
+  )
+```
+
+
+### Adjust the data prior to modelling
+
+Then, create the recipe with all data transformation adjustments needed using {recipes}
+
+```{r}
+rec_3820 <- recipe(
+  status ~ .,
+  data = train_ctrl_stats
+) |>
+  step_rm(
+    id,
+    sex,
+    prs_313_norm,
+    prs_broad_norm,
+    prs_ukbb_norm
+  ) |>
+  step_normalize(starts_with("pc"))
+
+```
+
+### Set engine of the model
+
+Set the engine that will be used to fit the model, and the operating mode with {parsnip}
+
+```{r}
+log_reg <- logistic_reg() |>
+  set_engine("glm") |>
+  set_mode("classification")
+```
+
+### Put everything together
+
+Put all pieces together as the final prep to fit the model using {workflows}
+
+```{r}
+wflow_3820 <- workflow() |>
+  add_model(log_reg) |>
+  add_recipe(rec_3820)
+```
+
+### Fit
+
+And finally fit the model
+
+```{r}
+fit_3820 <- wflow_3820 |>
+  fit(data = train_ctrl_stats)
+```
+
+### Get statistics
+
+Get PRS statistics with {broom} and adjust accordingly with {dplyr}
+
+```{r}
+tidy(fit_3820, exponentiate = T) |>
+  filter(grepl("prs", term)) |>
+  select(!all_of("std.error", "statistic"))
+```
+
+### New recipe without PCA
+
+To get AUC of PRS, a new model without PCA needed to be run. So I simply change the recipe.
+
+```{r}
+new_rec_3820 <- recipe(
+  status ~ .,
+  data = train_ctrl_stats
+) |>
+  step_rm(
+    id,
+    sex,
+    prs_313_norm,
+    prs_broad_norm,
+    prs_ukbb_norm,
+    starts_with("pc")
+  )
+
+new_wflow_rec_3820 <- wflow_3820 |>
+  update_recipe(new_rec_3820)
+
+fit_3820 <- new_wflow_rec_3820 |>
+  fit(data = train_ctrl_stats)
+```
+
+### Get metrics
+
+Predict and obtain metrics from {yardstick} using the prs-only methods
+
+```{r}
+# Predict probabilities
+pred_prob_3820 <- predict(
+  new_fit_3820,
+  new_data = test_ctrl_stats,
+  type = "prob"
+)
+
+# Add to testing data
+results_3820 <- test_ctrl_stats |>
+  bind_cols(pred_prob_3820)
+
+# Obtain ROC AUC
+roc_auc(results_3820, truth = status, .pred_0)
+```
+
+### Put all steps in a function
+
+```{r}
+get_prs_results <- function(bc_data, prs, seed) {
+  set.seed(seed)
+
+  # Get names so it can be used in setdiff() below
+  prs_names <- grep("prs", colnames(bc_data), value = T)
+  prs_names_norm <- paste0(prs_names, "_norm")
+
+  # Set PRS name with "norm" because we use the normalized version for the analyses
+  norm_prs <- paste0(prs, "_norm")
+
+  split <- initial_split(bc_data, strata = status, prop = 0.75)
+
+  train <- training(split)
+  test <- testing(split)
+
+  control_stats_train <- get_control_stats(train)
+
+  train_ctrl_stats <- train |>
+    # create norm prss
+    dplyr::mutate(
+      prs_broad_norm = (prs_broad - control_stats_train$prs_broad_mean) /
+        control_stats_train$prs_broad_sd,
+      prs_313_norm = (prs_313 - control_stats_train$prs_313_mean) /
+        control_stats_train$prs_313_sd,
+      prs_3820_norm = (prs_3820 - control_stats_train$prs_3820_mean) /
+        control_stats_train$prs_3820_sd,
+      prs_ukbb_norm = (prs_ukbb - control_stats_train$prs_ukbb_mean) /
+        control_stats_train$prs_ukbb_sd
+    ) |>
+    select(
+      !all_of(c("prs_broad", "prs_313", "prs_3820", "prs_ukbb"))
+    )
+
+  control_stats_test <- get_control_stats(test)
+
+  test_ctrl_stats <- test |>
+    # create norm prss
+    dplyr::mutate(
+      prs_broad_norm = (prs_broad - control_stats_test$prs_broad_mean) /
+        control_stats_test$prs_broad_sd,
+      prs_313_norm = (prs_313 - control_stats_test$prs_313_mean) /
+        control_stats_test$prs_313_sd,
+      prs_3820_norm = (prs_3820 - control_stats_test$prs_3820_mean) /
+        control_stats_test$prs_3820_sd,
+      prs_ukbb_norm = (prs_ukbb - control_stats_test$prs_ukbb_mean) /
+        control_stats_test$prs_ukbb_sd
+    ) |>
+    select(
+      !all_of(c("prs_broad", "prs_313", "prs_3820", "prs_ukbb"))
+    )
+
+  rec_prs <- recipe(
+    status ~ .,
+    data = train_ctrl_stats
+  ) |>
+    step_rm(
+      # remove variables
+      id,
+      sex,
+      setdiff(prs_names_norm, norm_prs)
+    ) |>
+    step_normalize(starts_with("pc"))
+
+  log_reg <- logistic_reg() |>
+    set_engine("glm") |>
+    set_mode("classification")
+
+  wflow_prs <- workflow() |>
+    add_model(log_reg) |>
+    add_recipe(rec_prs)
+
+  fit_prs <- wflow_prs |>
+    fit(data = train_ctrl_stats)
+
+  or <- tidy(fit_prs, exponentiate = T) |>
+    filter(grepl("prs", term)) |>
+    select(!all_of(c("std.error", "statistic")))
+
+  new_rec <- recipe(
+    status ~ .,
+    data = train_ctrl_stats
+  ) |>
+    step_rm(
+      id,
+      sex,
+      setdiff(prs_names_norm, norm_prs),
+      starts_with("pc")
+    )
+
+  new_wflow_rec <- wflow_prs |> update_recipe(new_rec)
+
+  new_fit <- new_wflow_rec |>
+    fit(data = train_ctrl_stats)
+
+  # Predict probabilities
+  pred_prob_prs <- predict(new_fit, new_data = test_ctrl_stats, type = "prob")
+
+  # Add to testing data
+  results_prs <- test_ctrl_stats |>
+    bind_cols(pred_prob_prs)
+
+  # Obtain ROC AUC
+  auc <- roc_auc(results_prs, truth = status, .pred_0)
+
+  return(list(or, auc))
+}
+
+```
+
+### Iterate over all PRSs 
+
+```{r}
+lapply(c("prs_313", "prs_3820", "prs_broad", "prs_ukbb"), function(x) {
+  get_prs_results(breast, x, seed = 28)
+}) |>
+  unlist()
+```
+
+
