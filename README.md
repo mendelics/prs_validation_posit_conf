@@ -1,6 +1,6 @@
 # PRS Validation Using Tidymodels
 
-This repository contains the code presented at posit::conf(2025) at the [Machine Learning and Statistical Modelling Section](https://reg.rainfocus.com/flow/posit/positconf25/attendee-portal/page/sessioncatalog/session/1745351601666001agrt).
+This repository contains the code presented at posit::conf(2025) at the [Machine Learning and Statistical Modelling Section](https://reg.rainfocus.com/flow/posit/positconf25/attendee-portal/page/sessioncatalog/session/1745351601666001agrt) entitled "Precision Medicine for All: Using Tidymodels to Validate Breast Cancer PRS in Brazil".
 
 What is contained in this repository?
 
